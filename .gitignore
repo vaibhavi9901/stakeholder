@@ -1,0 +1,9 @@
+wikineural/
+dont_need/
+apollo_limits.py
+apollo_testing.py
+apollo_ws.py
+compare.py
+missing_roles.py
+scraper.env
+output_files/
