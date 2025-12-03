@@ -17,32 +17,75 @@ from find_job_titles import Finder
 from langdetect import detect
 import openai
 import sys
+from PyQt5.QtWidgets import QApplication, QFileDialog
+
 
 # Load environment
 load_dotenv(dotenv_path="./scraper.env")
 
-# Google Sheet link
-sheet_input = input("Please enter the google sheet link (Accounts tab): ").strip()
-
-#GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1sto7OUVGs3E_GMv5jwhayDCLN9-_XkAsPGH-tOIfPBs/edit?usp=sharing"
-GOOGLE_SHEET_URL = sheet_input
-
-# Convert it to export format for pandas
-GOOGLE_SHEET_BASE = GOOGLE_SHEET_URL.split("/edit")[0]
-ACCOUNTS_URL = f"{GOOGLE_SHEET_BASE}/gviz/tq?tqx=out:csv&sheet=Accounts"
-ISM_SHEET_NAME = "🎯 ISM"
-ISM_URL = f"{GOOGLE_SHEET_BASE}/gviz/tq?tqx=out:csv&sheet={quote(ISM_SHEET_NAME)}"
-
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- Extract Google Sheet ID from the link ---
-match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", GOOGLE_SHEET_URL)
-if not match:
-    raise ValueError("Invalid Google Sheet URL.")
-SHEET_ID = match.group(1)
+# def pick_excel_file():
+#     app = QApplication(sys.argv)
+#     path, _ = QFileDialog.getOpenFileName(
+#         None,
+#         "Select Excel File",
+#         "",
+#         "Excel Files (*.xlsx *.xls)"
+#     )
+#     return path
 
-#OUTPUT_FILE = "LLM B&R stakeholders.xlsx"
-OUTPUT_FILE ="testing_stakeholders.xlsx"
+# while True:
+#     print("Please select your Excel file...")
+
+#     file_path = pick_excel_file()
+
+#     if not file_path:
+#         print("No file selected. Try again.\n")
+#         continue
+
+#     try:
+#         workbook = pd.ExcelFile(file_path)
+#     except Exception:
+#         print("Invalid Excel file. Try again.\n")
+#         continue
+
+#     sheet_names = workbook.sheet_names
+#     ism_sheet = None
+#     accounts_sheet = None
+
+#     # Find 🎯 ISM sheet
+#     for sheet in sheet_names:
+#         if sheet.strip().lower() == "🎯 ism".lower():
+#             ism_sheet = sheet
+#             break
+
+#     # Find first sheet containing "Account"
+#     for sheet in sheet_names:
+#         if "account" in sheet.lower():
+#             accounts_sheet = sheet
+#             break
+
+#     # Validate sheet presence
+#     if not ism_sheet or not accounts_sheet:
+#         print("Required sheet missing. Please upload a valid sheet.\n")
+#         continue
+
+#     print(f"✔ Found Accounts sheet: {accounts_sheet}")
+#     print(f"✔ Found ISM sheet: {ism_sheet}")
+#     break
+
+# accounts_df = workbook.parse(accounts_sheet)
+# ISM_df = workbook.parse(ism_sheet)
+
+# # Clean Accounts sheet
+# accounts_df.columns = accounts_df.columns.str.strip()
+# accounts_df = accounts_df.drop_duplicates(subset="Account Name")
+
+# Ask output file name
+OUTPUT_FILE = input("Save the output file as: ").strip()
+if not OUTPUT_FILE.lower().endswith(".xlsx"):
+    OUTPUT_FILE += ".xlsx"
 
 # Bypass API limits
 class RateLimiter:
@@ -119,9 +162,10 @@ def safe_findall(finder, text):
     except StopIteration:
         return []   # no matches in this string
     
-def get_roles_from_ism():
+def get_roles_from_ism(ISM_df):
     try:
-        df = pd.read_csv(ISM_URL)
+        #df = pd.read_csv(ISM_URL)
+        df = ISM_df.copy()
         matched = set()
         split_pattern = re.compile(r"[•●▪–—/\n,]+")  # separators
         exclude_text = set([
@@ -168,9 +212,7 @@ def get_roles_from_ism():
     except Exception as e:
         print(f"Error loading roles from ISM sheet: {e}", flush=True)
         return []
-    
-roles = get_roles_from_ism()
-print(roles)
+
 
 import inflect
 p = inflect.engine()
@@ -210,36 +252,34 @@ def generate_variations(roles_list):
         print(f"Error generating variations: {e}")
         return {}
 
-# 5. Build the full expanded role list
-role_variations_dict = generate_variations(roles)
-# Start with the original roles
-expanded_roles = roles.copy()
+# role_variations_dict = generate_variations(roles)
+# expanded_roles = roles.copy()
 
-# Calculate how many extra slots we have
-remaining_slots = 50 - len(expanded_roles)
+# # Calculate how many slots left for role generation
+# remaining_slots = 50 - len(expanded_roles)
 
-# Flatten variations into a list while avoiding duplicates
-variations_to_add = []
-seen_lower = set([r.lower() for r in expanded_roles])
+# # Flatten variations into a list while avoiding duplicates
+# variations_to_add = []
+# seen_lower = set([r.lower() for r in expanded_roles])
 
-for orig, variations in role_variations_dict.items():
-    for v in variations:
-        clean = v.strip().strip('"').strip("'")
-        if clean.lower() not in seen_lower:
-            expanded_roles.append(clean)
-            seen_lower.add(clean.lower())
-            remaining_slots -= 1
-        if remaining_slots <= 0:
-            break
-    if remaining_slots <= 0:
-        break
+# for orig, variations in role_variations_dict.items():
+#     for v in variations:
+#         clean = v.strip().strip('"').strip("'")
+#         if clean.lower() not in seen_lower:
+#             expanded_roles.append(clean)
+#             seen_lower.add(clean.lower())
+#             remaining_slots -= 1
+#         if remaining_slots <= 0:
+#             break
+#     if remaining_slots <= 0:
+#         break
 
-# Add the variations
-expanded_roles.extend(variations_to_add)
-expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
+# # Add the variations
+# expanded_roles.extend(variations_to_add)
+# expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
 
-print(f"Expanded roles list: {expanded_roles}")
-roles = expanded_roles
+# print(f"Expanded roles list: {expanded_roles}")
+# roles = expanded_roles
 
 
 seen_ids = set()
@@ -525,11 +565,12 @@ class ApolloClient:
 
 
 def main():
-    accounts_df = pd.read_csv(ACCOUNTS_URL)
+    #accounts_df = pd.read_csv(ACCOUNTS_URL)
+    global accounts_df
+    account_names = accounts_df["Account Name"].dropna().tolist()
     accounts_df.columns = accounts_df.columns.str.strip()
     accounts_df = accounts_df.drop_duplicates(subset="Account Name")
 
-    account_names = accounts_df["Account Name"].dropna().tolist()
     if "Company Website" in accounts_df.columns:
         account_domains = accounts_df["Company Website"].dropna().tolist()
     elif "Website" in accounts_df.columns:
@@ -708,6 +749,7 @@ def main():
         sleep(2)
         return combined_results
 
+    #BACKEND 
     # while True:
     #     user_input = input("Enter the maximum number of stakeholder entries per company: ").strip()
     #     try:
@@ -716,18 +758,83 @@ def main():
     #         break  # exit loop when valid input is given
     #     except ValueError:
     #         print("Invalid input. Please enter a valid number.\n")
+    # ^^^^^^^^^^^^^^^^^
 
-    if len(sys.argv) < 3:
-        print("Error: Missing required arguments (sheet_url, max_entries_per_company).")
-        return
+    #FRONTEND
+    if len(sys.argv) < 4:
+        print("ERROR: Missing args (file_path, max_entries_per_company, output_filename)")
+        sys.exit(1)
 
-    sheet_url = sys.argv[1]
+    file_path = sys.argv[1]
     max_entries_per_company = int(sys.argv[2])
+    OUTPUT_FILE = sys.argv[3]  # passed from FastAPI
 
-    print(f"Using sheet: {sheet_url}", flush=True)
-    print(f"Limiting to {max_entries_per_company} entries per company.\n", flush=True)
+    print(f"✔ Using uploaded file: {file_path}", flush=True)
+    print(f"✔ Max employees per company: {max_entries_per_company}", flush=True)
+    print(f"✔ Output filename: {OUTPUT_FILE}\n", flush=True)
 
-    accounts_df = pd.read_csv(sheet_url)
+    # Load Excel provided by FastAPI
+    workbook = pd.ExcelFile(file_path)
+
+    # Validate expected sheets
+    sheet_names = workbook.sheet_names
+    ism_sheet = None
+    accounts_sheet = None
+
+    for sheet in sheet_names:
+        if sheet.strip().lower() == "🎯 ism".lower():
+            ism_sheet = sheet
+        if "account" in sheet.lower():
+            accounts_sheet = sheet
+
+    if not ism_sheet or not accounts_sheet:
+        print("ERROR: Required sheet missing — stopping.")
+        sys.exit(1)
+
+    print(f"✔ Parsing sheets: {accounts_sheet} + {ism_sheet}", flush=True)
+
+    accounts_df = workbook.parse(accounts_sheet)
+    ISM_df = workbook.parse(ism_sheet)
+    roles = get_roles_from_ism(ISM_df)
+    print("Initial roles:", roles)
+    role_variations_dict = generate_variations(roles)
+    expanded_roles = roles.copy()
+
+    # Calculate how many slots left for role generation
+    remaining_slots = 50 - len(expanded_roles)
+
+    # Flatten variations into a list while avoiding duplicates
+    variations_to_add = []
+    seen_lower = set([r.lower() for r in expanded_roles])
+
+    for orig, variations in role_variations_dict.items():
+        for v in variations:
+            clean = v.strip().strip('"').strip("'")
+            if clean.lower() not in seen_lower:
+                expanded_roles.append(clean)
+                seen_lower.add(clean.lower())
+                remaining_slots -= 1
+            if remaining_slots <= 0:
+                break
+        if remaining_slots <= 0:
+            break
+
+    # Add the variations
+    expanded_roles.extend(variations_to_add)
+    expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
+
+    print(f"Expanded roles list: {expanded_roles}")
+    roles = expanded_roles
+
+    # Clean sheet
+    accounts_df.columns = accounts_df.columns.str.strip()
+    accounts_df = accounts_df.drop_duplicates(subset="Account Name")
+
+    # Save output
+    accounts_df.to_excel(OUTPUT_FILE, index=False)
+
+    print(f"{OUTPUT_FILE}")
+    # ^^^^^^^^^^^^^^^^
 
     for acc, domain, alpha2 in zip(account_names, account_domains, alpha2_codes):
         try:

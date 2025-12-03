@@ -2,35 +2,50 @@
 # # http://127.0.0.1:8000/docs
 
 import subprocess
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import glob
 
 app = FastAPI()
 
-# Allow local frontend access
+# Allow frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # in production, restrict this
+    allow_origins=["*"],  # tighten this in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-OUTPUT_FILE = "testing_stakeholders.xlsx"
+# Keep track of latest generated output file
+LATEST_OUTPUT = None
 
-@app.get("/search-stakeholders")
+@app.post("/search-stakeholders")
 async def run_script(
-    sheet_url: str = Query(..., description="Google Sheet URL containing account data"),
-    max_entries_per_company: int = Query(..., description="Maximum stakeholder entries per company"),
+    max_entries_per_company: int = Query(...),
+    output_name: str = Query(...),  # ★ user-input filename
+    excel_file: UploadFile = File(...)
 ):
-    """
-    Run excel_hybrid.py and stream stdout to frontend in real-time.
-    """
+    global LATEST_OUTPUT
 
-    # Pass both values as CLI arguments
-    cmd = ["python", "excel_hybrid.py", sheet_url, str(max_entries_per_company)]
+    # Save uploaded file locally
+    saved_path = f"/tmp/{excel_file.filename}"
+    with open(saved_path, "wb") as f:
+        f.write(await excel_file.read())
+
+    # Ensure output name ends with .xlsx
+    if not output_name.lower().endswith(".xlsx"):
+        output_name += ".xlsx"
+
+    cmd = [
+        "python",
+        "excel_hybrid.py",
+        saved_path,
+        str(max_entries_per_company),
+        output_name,
+    ]
 
     process = subprocess.Popen(
         cmd,
@@ -41,24 +56,40 @@ async def run_script(
     )
 
     async def stream_output():
+        global LATEST_OUTPUT
+
         for line in process.stdout:
-            yield f"data: {line.strip()}\n\n"
+            text = line.strip()
+
+            if text.lower().endswith(".xlsx"):
+                LATEST_OUTPUT = text
+
+            yield f"data: {text}\n\n"
 
         process.wait()
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(stream_output(), media_type="text/event-stream")
 
-
 @app.get("/download")
 async def download_file():
     """
     Allow frontend to download the generated Excel file.
     """
-    if os.path.exists(OUTPUT_FILE):
+
+    global LATEST_OUTPUT
+
+    # Fallback scan if filename was not detected
+    if not LATEST_OUTPUT:
+        candidates = glob.glob("*.xlsx")
+        if candidates:
+            LATEST_OUTPUT = max(candidates, key=os.path.getctime)
+
+    if LATEST_OUTPUT and os.path.exists(LATEST_OUTPUT):
         return FileResponse(
-            OUTPUT_FILE,
-            filename=OUTPUT_FILE,
+            LATEST_OUTPUT,
+            filename=LATEST_OUTPUT,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
     return {"error": "Output file not found"}
