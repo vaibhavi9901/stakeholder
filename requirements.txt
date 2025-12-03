@@ -9,3 +9,4 @@ langdetect
 PyQt5
 fastapi
 uvicorn
+python-multipart
