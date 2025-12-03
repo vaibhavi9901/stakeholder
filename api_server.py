@@ -22,8 +22,8 @@ app.add_middleware(
 # Keep track of latest generated output file
 LATEST_OUTPUT = None
 
-@app.get("/")
-def root():
+@app.head("/")
+def root_head():
     return {"message": "Site is running"}
 
 @app.post("/search-stakeholders")
