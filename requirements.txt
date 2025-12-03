@@ -1,0 +1,11 @@
+requests
+pandas
+python-dotenv
+openpyxl
+pycountry
+openai
+find-job-titles
+langdetect
+PyQt5
+fastapi
+uvicorn
