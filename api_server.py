@@ -22,10 +22,6 @@ app.add_middleware(
 # Keep track of latest generated output file
 LATEST_OUTPUT = None
 
-@app.head("/")
-def root_head():
-    return {"message": "Site is running"}
-
 @app.post("/search-stakeholders")
 async def run_script(
     max_entries_per_company: int = Query(...),

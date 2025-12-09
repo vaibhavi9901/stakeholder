@@ -25,68 +25,6 @@ load_dotenv(dotenv_path="./scraper.env")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# def pick_excel_file():
-#     app = QApplication(sys.argv)
-#     path, _ = QFileDialog.getOpenFileName(
-#         None,
-#         "Select Excel File",
-#         "",
-#         "Excel Files (*.xlsx *.xls)"
-#     )
-#     return path
-
-# while True:
-#     print("Please select your Excel file...")
-
-#     file_path = pick_excel_file()
-
-#     if not file_path:
-#         print("No file selected. Try again.\n")
-#         continue
-
-#     try:
-#         workbook = pd.ExcelFile(file_path)
-#     except Exception:
-#         print("Invalid Excel file. Try again.\n")
-#         continue
-
-#     sheet_names = workbook.sheet_names
-#     ism_sheet = None
-#     accounts_sheet = None
-
-#     # Find 🎯 ISM sheet
-#     for sheet in sheet_names:
-#         if sheet.strip().lower() == "🎯 ism".lower():
-#             ism_sheet = sheet
-#             break
-
-#     # Find first sheet containing "Account"
-#     for sheet in sheet_names:
-#         if "account" in sheet.lower():
-#             accounts_sheet = sheet
-#             break
-
-#     # Validate sheet presence
-#     if not ism_sheet or not accounts_sheet:
-#         print("Required sheet missing. Please upload a valid sheet.\n")
-#         continue
-
-#     print(f"✔ Found Accounts sheet: {accounts_sheet}")
-#     print(f"✔ Found ISM sheet: {ism_sheet}")
-#     break
-
-# accounts_df = workbook.parse(accounts_sheet)
-# ISM_df = workbook.parse(ism_sheet)
-
-# # Clean Accounts sheet
-# accounts_df.columns = accounts_df.columns.str.strip()
-# accounts_df = accounts_df.drop_duplicates(subset="Account Name")
-
-# Ask output file name
-OUTPUT_FILE = input("Save the output file as: ").strip()
-if not OUTPUT_FILE.lower().endswith(".xlsx"):
-    OUTPUT_FILE += ".xlsx"
-
 # Bypass API limits
 class RateLimiter:
     def __init__(self, per_minute=200, per_hour=400):
@@ -105,7 +43,7 @@ class RateLimiter:
 
             if len(last_minute) >= self.per_minute:
                 sleep_time = 60 - (now - last_minute[0]).total_seconds()
-                print(f"Minute cap hit. Resuming in {sleep_time:.1f}s...", flush=True)
+                #print(f"Minute cap hit. Resuming in {sleep_time:.1f}s...", flush=True)
                 sleep(max(sleep_time, 0))
 
             if len(self.request_times) >= self.per_hour:
@@ -133,7 +71,7 @@ def run_with_timeout(func, timeout, *args, **kwargs):
     p.join(timeout)
 
     if p.is_alive():
-        print(f"Timeout after {timeout}s for {func.__name__}, killing process.", flush=True)
+        print(f"Timeout after {timeout}s for {func.__name__}, exiting process prematurely.", flush=True)
         p.terminate()
         p.join()
         return []
@@ -214,10 +152,6 @@ def get_roles_from_ism(ISM_df):
         return []
 
 
-import inflect
-p = inflect.engine()
-
-
 def generate_variations(roles_list):
     prompt = (
         "For each of the following job titles, generate 1-2 titles"
@@ -252,35 +186,6 @@ def generate_variations(roles_list):
         print(f"Error generating variations: {e}")
         return {}
 
-# role_variations_dict = generate_variations(roles)
-# expanded_roles = roles.copy()
-
-# # Calculate how many slots left for role generation
-# remaining_slots = 50 - len(expanded_roles)
-
-# # Flatten variations into a list while avoiding duplicates
-# variations_to_add = []
-# seen_lower = set([r.lower() for r in expanded_roles])
-
-# for orig, variations in role_variations_dict.items():
-#     for v in variations:
-#         clean = v.strip().strip('"').strip("'")
-#         if clean.lower() not in seen_lower:
-#             expanded_roles.append(clean)
-#             seen_lower.add(clean.lower())
-#             remaining_slots -= 1
-#         if remaining_slots <= 0:
-#             break
-#     if remaining_slots <= 0:
-#         break
-
-# # Add the variations
-# expanded_roles.extend(variations_to_add)
-# expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
-
-# print(f"Expanded roles list: {expanded_roles}")
-# roles = expanded_roles
-
 
 seen_ids = set()
 class ApolloClient:
@@ -310,19 +215,19 @@ class ApolloClient:
             try:
                 resp = requests.post(url, headers=self.headers, json=payload)
                 if resp.status_code == 429:
-                    print(f"[Apollo] Rate limit hit, retrying in 10s (attempt {attempt+1}/5)...", flush=True)
+                    print(f"Apollo Rate limit hit, retrying in 10s (attempt {attempt+1}/5)...", flush=True)
                     sleep(10)
                     continue
                 if 500 <= resp.status_code < 600:
-                    print(f"[Apollo] Server error {resp.status_code}, retrying in 5s...", flush=True)
+                    print(f"Apollo Server error {resp.status_code}, retrying in 5s...", flush=True)
                     sleep(5)
                     continue
                 break
             except requests.exceptions.RequestException as e:
-                print(f"[Apollo] Request error: {e}, retrying in 5s...", flush=True)
+                print(f"Apollo Request error: {e}, retrying in 5s...", flush=True)
                 sleep(5)
         else:
-            print("[Apollo] Too many retries. Skipping.")
+            print("Too many retries. Skipping.")
             return None
 
         #resp = requests.post(url, headers=self.headers, json=payload)
@@ -418,13 +323,6 @@ class ApolloClient:
         else:
             payload["q_organization_domains_list[]"] = None
 
-        # if country:
-        #     country_obj = pycountry.countries.get(alpha_2=country.upper())
-        #     if country_obj:
-        #         payload["organization_location"] = country_obj.name
-        #         payload["person_locations[]"] = [country_obj.name]
-        #         #print(f"[DEBUG] Added location filter: {country_obj.name}")
-
         if country:
             # ensure it's a list
             if isinstance(country, str):
@@ -438,7 +336,7 @@ class ApolloClient:
             if country_list:
                 payload["person_locations[]"] = country_list
                 payload["organization_location"] = country_list[0]
-                print(f"[DEBUG] Added location filters: {country_list}", flush=True)
+                #print(f"[DEBUG] Added location filters: {country_list}", flush=True)
             
             else:
                 payload["person_locations[]"] = None
@@ -517,7 +415,7 @@ class ApolloClient:
             if country_list:
                 payload["person_locations[]"] = country_list
                 payload["organization_location"] = country_list[0]
-                print(f"[DEBUG] Added location filters: {country_list}", flush=True)
+                #print(f"[DEBUG] Added location filters: {country_list}", flush=True)
             
             else:
                 payload["person_locations[]"] = None
@@ -564,9 +462,72 @@ class ApolloClient:
         return all_results, pagination_info
 
 
+# def pick_excel_file():
+#     app = QApplication(sys.argv)
+#     path, _ = QFileDialog.getOpenFileName(
+#         None,
+#         "Select Excel File",
+#         "",
+#         "Excel Files (*.xlsx *.xls)"
+#     )
+#     return path
+
+# file_path = pick_excel_file()
+
+# while True:
+#         user_input = input("Enter the maximum number of stakeholder entries per company: ").strip()
+#         try:
+#             max_entries_per_company = int(user_input)
+#             print(f"\nLimiting to {max_entries_per_company} entries per company.\n", flush=True)
+#             break  # exit loop when valid input is given
+#         except ValueError:
+#             print("Invalid input. Please enter a valid number.\n")
+
+# # Ask output file name
+# OUTPUT_FILE = input("Save the output file as: ").strip()
+# if not OUTPUT_FILE.lower().endswith(".xlsx"):
+#     OUTPUT_FILE += ".xlsx"
+
+
 def main():
-    #accounts_df = pd.read_csv(ACCOUNTS_URL)
+    # if len(sys.argv) < 3:
+    #     print("ERROR: Missing (file_path, max_entries_per_company, output_file)")
+    #     sys.exit(1)
+
+    import inflect
+    p = inflect.engine()
+    
+    file_path = sys.argv[1]
+    max_entries_per_company = int(sys.argv[2])
+    OUTPUT_FILE = sys.argv[3]
+    
+    #print(f"✔ Using uploaded file: {file_path}", flush=True)
+    #print(f"✔ Max employees per company: {max_entries_per_company}", flush=True)
+    #print(f"✔ Output filename: {OUTPUT_FILE}", flush=True)
+
+    # --------------------------------------
+    # 2. LOAD WORKBOOK
+    # --------------------------------------
+    workbook = pd.ExcelFile(file_path)
+    sheet_names = workbook.sheet_names
+
+    # find sheets
+    ism_sheet = None
+    accounts_sheet = None
+    for sheet in sheet_names:
+        if sheet.strip().lower() == "🎯 ism".lower():
+            ism_sheet = sheet
+        if "account" in sheet.lower():
+            accounts_sheet = sheet
+
+    if not ism_sheet or not accounts_sheet:
+        print("ERROR: Required sheet missing — stopping.")
+        sys.exit(1)
+
+    print(f"✔ Parsing sheets: {accounts_sheet} + {ism_sheet}", flush=True)
+
     global accounts_df
+    accounts_df = workbook.parse(accounts_sheet)
     account_names = accounts_df["Account Name"].dropna().tolist()
     accounts_df.columns = accounts_df.columns.str.strip()
     accounts_df = accounts_df.drop_duplicates(subset="Account Name")
@@ -590,6 +551,37 @@ def main():
         account_domains = []
     alpha2_codes = accounts_df["HQ Country"].tolist()
     #REMOVE ^^^^^^^^
+
+    # Parse ISM sheet
+    ISM_df = workbook.parse(ism_sheet)
+    roles = get_roles_from_ism(ISM_df)
+    print("Initial roles:", roles)
+
+    # Generate variations
+    role_variations_dict = generate_variations(roles)
+    expanded_roles = roles.copy()
+    remaining_slots = 50 - len(expanded_roles)
+    seen_lower = set(r.lower() for r in expanded_roles)
+
+    for orig, variations in role_variations_dict.items():
+        for v in variations:
+            clean = v.strip().strip('"').strip("'")
+            if clean.lower() not in seen_lower:
+                expanded_roles.append(clean)
+                seen_lower.add(clean.lower())
+                remaining_slots -= 1
+            if remaining_slots <= 0:
+                break
+        if remaining_slots <= 0:
+            break
+
+    expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
+    roles = expanded_roles
+    print(f"Expanded roles list: {roles}")
+
+    # Save cleaned accounts sheet (not the stakeholders)
+    accounts_df.to_excel(OUTPUT_FILE, index=False)
+    print(OUTPUT_FILE)
 
     apollo = ApolloClient()
     all_people = []
@@ -620,7 +612,7 @@ def main():
             
             while True:
                 apollo.ratelimiter.wait_for_slot()
-                print(f"Apollo domain: {org_info.get('domain')}", flush=True)
+                #print(f"Apollo domain: {org_info.get('domain')}", flush=True)
                 contacts, pagination_c = apollo.search_contacts(
                     org_id=org_info["org_id"],
                     #domain = org_info["domain"],
@@ -726,7 +718,7 @@ def main():
 
                 print(f"Number of people found:{len(combined_results)}", flush=True)
                 if len(combined_results) >= max_entries_per_company:
-                    print(f"Reached max entries ({max_entries_per_company}) for {acc}", flush=True)
+                    print(f"Reached stakeholder limit ({max_entries_per_company}) for {acc}", flush=True)
                     return combined_results[:max_entries_per_company]
 
                 #total_pages = pagination.get("total_pages", page)
@@ -744,97 +736,10 @@ def main():
             return combined_results
 
         if not found_any:
-            print(f"No Apollo match for {acc}", flush=True)
+            print(f"No Apollo match for {acc}.", flush=True)
             missing_accounts.append({"Account Name": acc, "HQ Country": country_code})
         sleep(2)
         return combined_results
-
-    #BACKEND 
-    # while True:
-    #     user_input = input("Enter the maximum number of stakeholder entries per company: ").strip()
-    #     try:
-    #         max_entries_per_company = int(user_input)
-    #         print(f"\nLimiting to {max_entries_per_company} entries per company.\n", flush=True)
-    #         break  # exit loop when valid input is given
-    #     except ValueError:
-    #         print("Invalid input. Please enter a valid number.\n")
-    # ^^^^^^^^^^^^^^^^^
-
-    #FRONTEND
-    if len(sys.argv) < 4:
-        print("ERROR: Missing args (file_path, max_entries_per_company, output_filename)")
-        sys.exit(1)
-
-    file_path = sys.argv[1]
-    max_entries_per_company = int(sys.argv[2])
-    OUTPUT_FILE = sys.argv[3]  # passed from FastAPI
-
-    print(f"✔ Using uploaded file: {file_path}", flush=True)
-    print(f"✔ Max employees per company: {max_entries_per_company}", flush=True)
-    print(f"✔ Output filename: {OUTPUT_FILE}\n", flush=True)
-
-    # Load Excel provided by FastAPI
-    workbook = pd.ExcelFile(file_path)
-
-    # Validate expected sheets
-    sheet_names = workbook.sheet_names
-    ism_sheet = None
-    accounts_sheet = None
-
-    for sheet in sheet_names:
-        if sheet.strip().lower() == "🎯 ism".lower():
-            ism_sheet = sheet
-        if "account" in sheet.lower():
-            accounts_sheet = sheet
-
-    if not ism_sheet or not accounts_sheet:
-        print("ERROR: Required sheet missing — stopping.")
-        sys.exit(1)
-
-    print(f"✔ Parsing sheets: {accounts_sheet} + {ism_sheet}", flush=True)
-
-    accounts_df = workbook.parse(accounts_sheet)
-    ISM_df = workbook.parse(ism_sheet)
-    roles = get_roles_from_ism(ISM_df)
-    print("Initial roles:", roles)
-    role_variations_dict = generate_variations(roles)
-    expanded_roles = roles.copy()
-
-    # Calculate how many slots left for role generation
-    remaining_slots = 50 - len(expanded_roles)
-
-    # Flatten variations into a list while avoiding duplicates
-    variations_to_add = []
-    seen_lower = set([r.lower() for r in expanded_roles])
-
-    for orig, variations in role_variations_dict.items():
-        for v in variations:
-            clean = v.strip().strip('"').strip("'")
-            if clean.lower() not in seen_lower:
-                expanded_roles.append(clean)
-                seen_lower.add(clean.lower())
-                remaining_slots -= 1
-            if remaining_slots <= 0:
-                break
-        if remaining_slots <= 0:
-            break
-
-    # Add the variations
-    expanded_roles.extend(variations_to_add)
-    expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
-
-    print(f"Expanded roles list: {expanded_roles}")
-    roles = expanded_roles
-
-    # Clean sheet
-    accounts_df.columns = accounts_df.columns.str.strip()
-    accounts_df = accounts_df.drop_duplicates(subset="Account Name")
-
-    # Save output
-    accounts_df.to_excel(OUTPUT_FILE, index=False)
-
-    print(f"{OUTPUT_FILE}")
-    # ^^^^^^^^^^^^^^^^
 
     for acc, domain, alpha2 in zip(account_names, account_domains, alpha2_codes):
         try:
