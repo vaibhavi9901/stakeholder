@@ -11,29 +11,48 @@ import pandas as pd
 import time
 import threading
 from queue import Queue, Empty
+import shutil
+import uuid
+import atexit
 
 st.set_page_config(page_title="Automated Stakeholder Researcher", layout="wide")
 
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid.uuid4().hex
+if "session_dir" not in st.session_state:
+    # Create a per-session temp directory
+    sd = tempfile.mkdtemp(prefix=f"session_{st.session_state.session_id}_")
+    st.session_state.session_dir = sd
+
+def _register_session_cleanup(session_dir):
+    def _cleanup():
+        try:
+            shutil.rmtree(session_dir, ignore_errors=True)
+        except Exception:
+            pass
+    atexit.register(_cleanup)
+
+if "session_cleanup_registered" not in st.session_state:
+    _register_session_cleanup(st.session_state.session_dir)
+    st.session_state.session_cleanup_registered = True
+
 if "log_text" not in st.session_state:
     st.session_state.log_text = ""
-
-if "output_ready" not in st.session_state:
-    st.session_state.output_ready = False
-
-if "log_queue" not in st.session_state:
-    st.session_state.log_queue = Queue()
-
-if "thread_started" not in st.session_state:
-    st.session_state.thread_started = False
-
-# --- SESSION STATE SETUP ---
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
 if "process" not in st.session_state:
     st.session_state.process = None
-
+if "thread" not in st.session_state:
+    st.session_state.thread = None
 if "stopped" not in st.session_state:
     st.session_state.stopped = False
+if "_io_lock" not in st.session_state:
+    # small lock for thread-safe writes to session_state.log_text
+    st.session_state._io_lock = threading.Lock()
+
+# Helper paths (per-session)
+def session_path(name: str) -> str:
+    return os.path.join(st.session_state.session_dir, name)
 
 col1, col2 = st.columns([1, 5])
 
@@ -96,268 +115,203 @@ action_button = st.button(button_label)
 with st.expander("View progress", expanded=True):
     log_placeholder = st.empty()
 
-# def display_logs(text):
-#     log_placeholder.code(text)
+# Thread target: read process stdout line-by-line and append to session log file & session_state.log_text
+def _reader_thread(proc, log_file_path):
+    try:
+        with open(log_file_path, "a", encoding="utf-8") as lf:
+            # Read lines until process ends
+            for raw_line in iter(proc.stdout.readline, ""):
+                if raw_line == "" and proc.poll() is not None:
+                    break
+                if not raw_line:
+                    time.sleep(0.05)
+                    continue
+                # Write both to disk (persist across reruns) and to in-memory log_text
+                lf.write(raw_line)
+                lf.flush()
+                with st.session_state._io_lock:
+                    # Keep last N KB to avoid runaway memory usage (trim if huge)
+                    st.session_state.log_text += raw_line
+                    if len(st.session_state.log_text) > 200_000:  # ~200KB cap, trim older part
+                        st.session_state.log_text = st.session_state.log_text[-150_000:]
+            # ensure any remaining lines are read
+            remaining = proc.stdout.read()
+            if remaining:
+                lf.write(remaining)
+                lf.flush()
+                with st.session_state._io_lock:
+                    st.session_state.log_text += remaining
+    except Exception as e:
+        with st.session_state._io_lock:
+            st.session_state.log_text += f"\n[reader thread error] {e}\n"
+    finally:
+        # Mark finished
+        with st.session_state._io_lock:
+            st.session_state.is_running = False
+            st.session_state.process = None
+            st.session_state.thread = None
+            st.session_state.stopped = True  # user can reset
+            st.session_state.log_text += "\n[PROCESS FINISHED]\n"
 
-# ---- BUTTON ACTION HANDLING ----
+# Action button behavior
 if action_button:
-
+    # Start run
     if not st.session_state.is_running and not st.session_state.stopped:
-        # --- Start Process ---
         if not uploaded_file:
             st.error("Please upload an Excel file first.")
             st.stop()
 
-        st.session_state.log_text = ""   # RESET LOGS ON NEW RUN
-        st.session_state.thread_started = False 
-        st.session_state.output_ready = False
-        st.session_state.process = None
+        # Reset session logging
+        st.session_state.log_text = ""
+        # Save uploaded file to a per-session input path
+        input_path = session_path(f"input_{uuid.uuid4().hex}.xlsx")
+        with open(input_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        # Unique output path inside session dir
+        output_path = session_path(f"output_{uuid.uuid4().hex}_{output_name}")
+
+        # Build command (point to your excel_hybrid.py)
+        cmd = [
+            sys.executable,
+            "-u",
+            "-W",
+            "ignore",
+            "excel_hybrid.py",
+            input_path,
+            str(max_entries),
+            output_path,
+        ]
+
+        # Start subprocess and reader thread
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as e:
+            st.error(f"Failed to start extraction process: {e}")
+            st.stop()
+
+        st.session_state.process = proc
         st.session_state.is_running = True
         st.session_state.stopped = False
-        st.rerun()
 
-    elif st.session_state.is_running:
+        log_file = session_path("process.log")
+        # ensure previous log file cleared
         try:
-            if st.session_state.process:
-                st.session_state.process.terminate()
+            open(log_file, "w").close()
         except Exception:
             pass
 
-        st.session_state.process = None
-        st.session_state.is_running = False
-        st.session_state.output_ready = True
-        st.session_state.stopped = True   # <-- mark that Stop was pressed
-        st.rerun()
+        th = threading.Thread(target=_reader_thread, args=(proc, log_file), daemon=True)
+        th.start()
+        st.session_state.thread = th
 
-    # ---- Reset everything ----
-    else:  # Reset button clicked
+    # Stop (terminate) the running process
+    elif st.session_state.is_running:
+        proc = st.session_state.process
+        try:
+            if proc and proc.poll() is None:
+                proc.terminate()
+                # Give it short grace then kill if still alive
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except Exception as e:
+            st.session_state.log_text += f"\n[Stop failed] {e}\n"
+        finally:
+            st.session_state.is_running = False
+            st.session_state.stopped = True
+            st.session_state.process = None
+            st.session_state.log_text += "\n[PROCESS TERMINATED BY USER]\n"
+
+    # Reset state to allow new run
+    else:
         st.session_state.stopped = False
         st.session_state.output_ready = False
         st.session_state.log_text = ""
-        st.session_state.thread_started = False
         st.session_state.process = None
         st.session_state.is_running = False
-        st.rerun()
+        # optional: clear session_dir contents (keeps dir)
+        try:
+            for fname in os.listdir(st.session_state.session_dir):
+                path = os.path.join(st.session_state.session_dir, fname)
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                    elif os.path.isdir(path):
+                        shutil.rmtree(path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        st.experimental_rerun()
 
-# ---- RUNNING MODE ----
+# While running: show progress and keep UI responsive
 if st.session_state.is_running:
-
     st.write("Running stakeholder extraction...")
-
-    temp_input = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    temp_input.write(uploaded_file.read())
-    temp_input.flush()
-
-    temp_output = os.path.join(tempfile.gettempdir(), output_name)
-
-    cmd = [
-        sys.executable,
-        "-u",
-        "-W", "ignore",
-        "excel_hybrid.py",
-        temp_input.name,
-        str(max_entries),
-        temp_output
-    ]
-
-    if not st.session_state.process:
-        st.session_state.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-
-    def stream_output(proc, queue):
-        for line in iter(proc.stdout.readline, ""):
-            if not line:
-                break
-            queue.put(line)  # push log line safely
-
-        proc.stdout.close()
-        queue.put("__PROCESS_FINISHED__")
+    # show current in-memory logs
+    with st.session_state._io_lock:
+        log_placeholder.code(st.session_state.log_text if st.session_state.log_text else "Starting...")
+    # small delay to avoid busy-looping UI (Streamlit reruns regularly)
+    time.sleep(0.2)
+else:
+    # If not running, but a process.log exists, read it into log_text (persist across reruns)
+    log_file = session_path("process.log")
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, "r", encoding="utf-8") as lf:
+                content = lf.read()
+            with st.session_state._io_lock:
+                # keep memory + file consistent
+                st.session_state.log_text = content
+        except Exception:
+            pass
     
-    if st.session_state.is_running and st.session_state.process:
-        if not st.session_state.thread_started:
-            threading.Thread(
-                target=stream_output,
-                args=(st.session_state.process, st.session_state.log_queue),
-                daemon=True
-            ).start()
-            st.session_state.thread_started = True
-        
-        # Read all available lines in the queue
-        log_placeholder = st.empty()
+    # display logs
+    # with st.session_state._io_lock:
+    #     log_placeholder.code(st.session_state.log_text if st.session_state.log_text else "No run yet. Click Run Extraction.")
 
-        # Read any lines currently in the queue
-        while not st.session_state.log_queue.empty():
-            line = st.session_state.log_queue.get()
-            if line == "__PROCESS_FINISHED__":
-                st.session_state.output_ready = True
-                st.session_state.is_running = False
-            else:
-                st.session_state.log_text += line
+def find_output_file():
+    files = os.listdir(st.session_state.session_dir)
+    # look for files that end with the provided output_name or look like outputs
+    candidates = [
+        os.path.join(st.session_state.session_dir, f)
+        for f in files
+        if f.endswith(output_name) or f.startswith("output_")
+    ]
+    # prefer exact match
+    for c in candidates:
+        if c.endswith(output_name):
+            return c
+    # otherwise return newest candidate
+    if candidates:
+        return max(candidates, key=os.path.getmtime)
+    return None
 
-        log_placeholder.code(st.session_state.log_text)
-        time.sleep(0.1)  # adjust as needed
+output_file = find_output_file()
+if output_file and os.path.exists(output_file):
+    with st.expander("Download Stakeholders", expanded=True):
+        with open(output_file, "rb") as f:
+            st.download_button(label="Download Stakeholders", data=f, file_name=os.path.basename(output_file))
 
-# ---- SHOW DOWNLOAD BUTTON IF READY ----
-if st.session_state.output_ready:
-    temp_output = os.path.join(tempfile.gettempdir(), output_name)
-    if os.path.exists(temp_output):
-
-        with st.expander("Download Stakeholders", expanded=True):
-            with open(temp_output, "rb") as f:
-                st.download_button(
-                    label="Download Stakeholders",
-                    data=f,
-                    file_name=output_name
-                )
-
-
-# import streamlit as st
-# import subprocess
-# import sys
-# import os
-# import tempfile
-# import time
-# from pathlib import Path
-
-# st.set_page_config(page_title="Excel Hybrid - Streamlit Wrapper", layout="wide")
-
-# st.title("Excel Hybrid — Streamlit front-end")
-# st.write(
-#     "Upload an Excel file, choose the maximum number of stakeholder entries per company, "
-#     "pick an output filename, run the backend, watch its prints in real time and download the result."
-# )
-
-# # File uploader
-# uploaded = st.file_uploader("Upload the Excel file (accounts/workbook) for processing", type=["xls", "xlsx", "csv"])
-# cols = st.columns([1, 1, 1])
-# with cols[0]:
-#     max_entries_per_company = st.number_input(
-#         "Max stakeholder entries per company",
-#         min_value=1,
-#         max_value=500,
-#         value=50,
-#         step=1,
-#         help="This maps to the second argv your backend expects (max entries per company)."
-#     )
-# with cols[1]:
-#     output_filename = st.text_input(
-#         "Desired output filename",
-#         value="stakeholders_output.xlsx",
-#         help="Will be saved and offered for download. .xlsx will be added if missing."
-#     )
-# with cols[2]:
-#     run_button = st.button("Run backend")
-
-# # put status/log area below
-# log_placeholder = st.empty()
-# download_placeholder = st.empty()
-
-# # helper to ensure extension & absolute path in temp folder
-# def prepare_output_fullpath(name: str) -> str:
-#     if not name.lower().endswith(".xlsx"):
-#         name = name + ".xlsx"
-#     # keep outputs inside a temp directory
-#     out_dir = Path(tempfile.gettempdir()) / "excel_hybrid_outputs"
-#     out_dir.mkdir(parents=True, exist_ok=True)
-#     full = out_dir / name
-#     return str(full.resolve())
-
-# # main run block
-# if run_button:
-#     if uploaded is None:
-#         st.warning("Please upload an Excel file before running.")
-#     else:
-#         # save uploaded file to a temp path
-#         tmp_dir = Path(tempfile.gettempdir()) / "excel_hybrid_inputs"
-#         tmp_dir.mkdir(parents=True, exist_ok=True)
-#         uploaded_path = tmp_dir / (uploaded.name or "uploaded_accounts.xlsx")
-#         # write the uploaded content to disk
-#         with open(uploaded_path, "wb") as f:
-#             f.write(uploaded.getbuffer())
-
-#         output_fullpath = prepare_output_fullpath(output_filename)
-
-#         st.info(f"Saved uploaded file to: `{uploaded_path}`\nOutput will be: `{output_fullpath}`")
-#         st.experimental_rerun() if False else None  # no-op to please linter
-
-#         # Build command: invoke the same python interpreter
-#         python_exe = sys.executable or "python"
-#         backend_script_path = "./excel_hybrid.py" 
-#         if not os.path.exists(backend_script_path):
-#             st.error(f"Backend script not found at `{backend_script_path}`. Update path in the app if needed.")
+# Optional: provide a cleanup button to delete session temp files (useful for long-running sessions)
+# if st.button("Cleanup session files"):
+#     try:
+#         if st.session_state.process and st.session_state.process.poll() is None:
+#             st.warning("Process still running — stop it before cleanup.")
 #         else:
-#             cmd = [
-#                 python_exe,
-#                 "-u",                      
-#                 backend_script_path,
-#                 str(uploaded_path),
-#                 str(int(max_entries_per_company)),
-#                 str(output_fullpath),
-#             ]
+#             shutil.rmtree(st.session_state.session_dir, ignore_errors=True)
+#             # create a fresh session dir
+#             sd = tempfile.mkdtemp(prefix=f"session_{st.session_state.session_id}_")
+#             st.session_state.session_dir = sd
+#             st.success("Session files removed.")
+#     except Exception as e:
+#         st.error(f"Cleanup failed: {e}")
 
-#             st.write("Running backend...")
-#             # area for the log text
-#             log_area = log_placeholder.empty()
-#             log_text = ""
 
-#             # run subprocess and stream stdout/stderr
-#             try:
-#                 # use text mode (universal newlines) for line iteration
-#                 proc = subprocess.Popen(
-#                     cmd,
-#                     stdout=subprocess.PIPE,
-#                     stderr=subprocess.STDOUT,
-#                     text=True,
-#                     #universal_newlines=True,
-#                 )
-#             except Exception as e:
-#                 st.exception(e)
-#             else:
-#                 # read lines as they become available
-#                 try:
-#                     # loop until process terminates
-#                     while True:
-#                         # read one line
-#                         line = proc.stdout.readline()
-#                         if line:
-#                             # append & update UI
-#                             log_text += line
-#                             # use monospace block for nice formatting
-#                             log_area.code(log_text, language="text")
-#                         else:
-#                             # if process finished and no more output, break
-#                             if proc.poll() is not None:
-#                                 # read remaining output
-#                                 remainder = proc.stdout.read()
-#                                 if remainder:
-#                                     log_text += remainder
-#                                     log_area.code(log_text, language="text")
-#                                 break
-#                             # otherwise pause briefly and continue
-#                             time.sleep(0.05)
-#                 except Exception as e:
-#                     st.exception(e)
-#                 finally:
-#                     returncode = proc.poll()
-#                     st.write(f"Backend finished with return code: {returncode}")
-
-#                 # After process completes, check for output file
-#                 if os.path.exists(output_fullpath):
-#                     st.success(f"Output file created: `{output_fullpath}`")
-#                     # read bytes and show download button
-#                     with open(output_fullpath, "rb") as f:
-#                         data_bytes = f.read()
-#                     download_placeholder.download_button(
-#                         label="Download output Excel file",
-#                         data=data_bytes,
-#                         file_name=os.path.basename(output_fullpath),
-#                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-#                     )
-#                 else:
-#                     st.error("The backend did not produce the expected output file.")
-#                     st.write("Checked for:", output_fullpath)

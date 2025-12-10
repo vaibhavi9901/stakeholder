@@ -8,7 +8,8 @@ import urllib.parse
 from urllib.parse import urljoin
 from urllib.parse import quote
 import pandas as pd
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
+import toml
 from openpyxl import load_workbook
 import pycountry
 from multiprocessing import Process, Queue
@@ -21,9 +22,10 @@ from PyQt5.QtWidgets import QApplication, QFileDialog
 
 
 # Load environment
-load_dotenv(dotenv_path="./scraper.env")
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+#load_dotenv(dotenv_path="./scraper.env")
+#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+config = toml.load("scraper.toml")
+client = OpenAI(api_key=config["OPENAI_API_KEY"])
 
 # Bypass API limits
 class RateLimiter:
@@ -190,7 +192,8 @@ def generate_variations(roles_list):
 seen_ids = set()
 class ApolloClient:
     def __init__(self):
-        self.api_key = os.getenv("APOLLO_API_KEY")
+        #self.api_key = os.getenv("APOLLO_API_KEY")
+        self.api_key = config["APOLLO_API_KEY"]
         self.base_url = "https://api.apollo.io/api/v1"
         self.headers = {
             "accept": "application/json",
@@ -461,7 +464,7 @@ class ApolloClient:
         #print(f"[DEBUG] Payload being sent: {payload}")
         return all_results, pagination_info
 
-
+# BACKEND TESTING
 # def pick_excel_file():
 #     app = QApplication(sys.argv)
 #     path, _ = QFileDialog.getOpenFileName(
@@ -488,6 +491,7 @@ class ApolloClient:
 # if not OUTPUT_FILE.lower().endswith(".xlsx"):
 #     OUTPUT_FILE += ".xlsx"
 
+# ^^^^^^^^
 
 def main():
     # if len(sys.argv) < 3:
@@ -497,17 +501,16 @@ def main():
     import inflect
     p = inflect.engine()
 
+    # FRONTEND 
     file_path = sys.argv[1]
     max_entries_per_company = int(sys.argv[2])
     OUTPUT_FILE = sys.argv[3]
     
+    # Debugging 
     #print(f"✔ Using uploaded file: {file_path}", flush=True)
     #print(f"✔ Max employees per company: {max_entries_per_company}", flush=True)
     #print(f"✔ Output filename: {OUTPUT_FILE}", flush=True)
 
-    # --------------------------------------
-    # 2. LOAD WORKBOOK
-    # --------------------------------------
     workbook = pd.ExcelFile(file_path)
     sheet_names = workbook.sheet_names
 
