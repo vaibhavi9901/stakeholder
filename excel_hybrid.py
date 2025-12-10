@@ -496,7 +496,7 @@ def main():
 
     import inflect
     p = inflect.engine()
-    
+
     file_path = sys.argv[1]
     max_entries_per_company = int(sys.argv[2])
     OUTPUT_FILE = sys.argv[3]
@@ -541,15 +541,15 @@ def main():
     alpha2_codes = accounts_df["HQ Country"].tolist()
 
     # FOR TESTING (REMOVE LATER): Limit to the first few rows
-    accounts_df = accounts_df.head(5)
-    account_names = accounts_df["Account Name"].dropna().tolist()
-    if "Company Website" in accounts_df.columns:
-        account_domains = accounts_df["Company Website"].dropna().tolist()
-    elif "Website" in accounts_df.columns:
-        account_domains = accounts_df["Website"].dropna().tolist()
-    else:
-        account_domains = []
-    alpha2_codes = accounts_df["HQ Country"].tolist()
+    # accounts_df = accounts_df.head(5)
+    # account_names = accounts_df["Account Name"].dropna().tolist()
+    # if "Company Website" in accounts_df.columns:
+    #     account_domains = accounts_df["Company Website"].dropna().tolist()
+    # elif "Website" in accounts_df.columns:
+    #     account_domains = accounts_df["Website"].dropna().tolist()
+    # else:
+    #     account_domains = []
+    # alpha2_codes = accounts_df["HQ Country"].tolist()
     #REMOVE ^^^^^^^^
 
     # Parse ISM sheet
