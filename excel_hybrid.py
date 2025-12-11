@@ -22,10 +22,8 @@ from PyQt5.QtWidgets import QApplication, QFileDialog
 
 
 # Load environment
-#load_dotenv(dotenv_path="./scraper.env")
-#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 config = toml.load("scraper.toml")
-client = OpenAI(api_key=config["OPENAI_API_KEY"])
+#client = OpenAI(api_key=config["OPENAI_API_KEY"])
 
 # Bypass API limits
 class RateLimiter:
@@ -175,39 +173,39 @@ def get_roles_from_ism(ISM_df):
         return []
 
 
-def generate_variations(roles_list):
-    prompt = (
-        "For each of the following job titles, generate 1-2 titles"
-        "that are similar and are in the language of the given roles. Include seniority variants, synonyms, and expanded forms. "
-        "Normalize ALL titles in roles_list."
-        "Return a dictionary-like format"
-        "with the original title as key and comma-separated variations as values.\n\n"
-        f"Titles:\n{', '.join(roles_list)}"
-    )
-    try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that generates job title variations."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=500
-        )
-        out = response.choices[0].message.content.strip()
+# def generate_variations(roles_list):
+#     prompt = (
+#         "For each of the following job titles, generate 1-2 titles"
+#         "that are similar and are in the language of the given roles. Include seniority variants, synonyms, and expanded forms. "
+#         "Normalize ALL titles in roles_list."
+#         "Return a dictionary-like format"
+#         "with the original title as key and comma-separated variations as values.\n\n"
+#         f"Titles:\n{', '.join(roles_list)}"
+#     )
+#     try:
+#         response = client.chat.completions.create(
+#             model="gpt-3.5-turbo",
+#             messages=[
+#                 {"role": "system", "content": "You are a helpful assistant that generates job title variations."},
+#                 {"role": "user", "content": prompt}
+#             ],
+#             temperature=0.1,
+#             max_tokens=500
+#         )
+#         out = response.choices[0].message.content.strip()
 
-        role_variations = {}
-        for line in out.split("\n"):
-            if ":" in line:
-                key, vals = line.split(":", 1)
-                items = [v.strip() for v in re.split(r",|\n", vals) if v.strip()]
-                role_variations[key.strip()] = items
+#         role_variations = {}
+#         for line in out.split("\n"):
+#             if ":" in line:
+#                 key, vals = line.split(":", 1)
+#                 items = [v.strip() for v in re.split(r",|\n", vals) if v.strip()]
+#                 role_variations[key.strip()] = items
 
-        return role_variations
+#         return role_variations
 
-    except Exception as e:
-        print(f"Error generating variations: {e}")
-        return {}
+#     except Exception as e:
+#         print(f"Error generating variations: {e}")
+#         return {}
 
 
 seen_ids = set()
