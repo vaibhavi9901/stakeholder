@@ -175,7 +175,7 @@ if action_button:
         cmd = [
             sys.executable,
             "-u",
-            "-W",
+            #"-W",
             "ignore",
             "excel_hybrid.py",
             input_path,
