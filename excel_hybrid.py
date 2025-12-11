@@ -18,7 +18,7 @@ from find_job_titles import Finder
 from langdetect import detect
 import openai
 import sys
-from PyQt5.QtWidgets import QApplication, QFileDialog
+#from PyQt5.QtWidgets import QApplication, QFileDialog # backend testing
 
 
 # Load environment
