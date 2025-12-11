@@ -5,54 +5,128 @@ import sys
 import subprocess
 import tempfile
 import os
-from io import StringIO
-from PIL import Image
-import pandas as pd
 import time
 import threading
-from queue import Queue, Empty
 import shutil
 import uuid
 import atexit
+from queue import Queue, Empty
+import pandas as pd
+from typing import Optional, Dict, Any
 
-st.set_page_config(page_title="Automated Stakeholder Researcher", layout="wide")
+# Initialize all session state variables upfront
+def init_session_state():
+    """Initialize all session state variables"""
+    defaults = {
+        "session_id": uuid.uuid4().hex,
+        "session_dir": None,
+        "log_text": "",
+        "is_running": False,
+        "process": None,
+        "thread": None,
+        "stopped": False,
+        "session_cleanup_registered": False,
+        "output_ready": False,
+        "last_scan_time": 0,  # For cache invalidation
+    }
+    
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+    
+    # Create session directory if not exists
+    if st.session_state.session_dir is None:
+        sd = tempfile.mkdtemp(prefix=f"session_{st.session_state.session_id}_")
+        st.session_state.session_dir = sd
+    
+    return st.session_state
 
-if "session_id" not in st.session_state:
-    st.session_state.session_id = uuid.uuid4().hex
-if "session_dir" not in st.session_state:
-    # Create a per-session temp directory
-    sd = tempfile.mkdtemp(prefix=f"session_{st.session_state.session_id}_")
-    st.session_state.session_dir = sd
+# Initialize session state
+init_session_state()
 
-def _register_session_cleanup(session_dir):
-    def _cleanup():
-        try:
-            shutil.rmtree(session_dir, ignore_errors=True)
-        except Exception:
-            pass
-    atexit.register(_cleanup)
+# Create a global log queue (not in session state)
+if "log_queue" not in globals():
+    global log_queue
+    log_queue = Queue()
 
-if "session_cleanup_registered" not in st.session_state:
-    _register_session_cleanup(st.session_state.session_dir)
-    st.session_state.session_cleanup_registered = True
+# Cache for file scanning operations with invalidation
+@st.cache_data(ttl=10, show_spinner=False)  # Cache for 10 seconds
+def scan_output_directory(_session_dir: str, output_name: str, _last_scan_time: float) -> Dict[str, Any]:
+    """
+    Scan directory for output files with caching.
+    The underscore prefix on parameters tells Streamlit not to hash them for cache key.
+    """
+    result = {
+        "output_file": None,
+        "file_size": 0,
+        "file_mtime": 0,
+        "candidates": []
+    }
+    
+    try:
+        if not os.path.exists(_session_dir):
+            return result
+            
+        files = os.listdir(_session_dir)
+        
+        # Look for output files
+        candidates = []
+        for f in files:
+            file_path = os.path.join(_session_dir, f)
+            if os.path.isfile(file_path):
+                if f.endswith(output_name) or f.startswith("output_"):
+                    stat_info = os.stat(file_path)
+                    candidates.append({
+                        "path": file_path,
+                        "name": f,
+                        "size": stat_info.st_size,
+                        "mtime": stat_info.st_mtime,
+                        "is_exact_match": f.endswith(output_name)
+                    })
+        
+        if candidates:
+            # Sort by exact match first, then by modification time
+            candidates.sort(key=lambda x: (-x["is_exact_match"], -x["mtime"]))
+            best_candidate = candidates[0]
+            
+            result["output_file"] = best_candidate["path"]
+            result["file_size"] = best_candidate["size"]
+            result["file_mtime"] = best_candidate["mtime"]
+            result["candidates"] = [c["path"] for c in candidates]
+    
+    except Exception as e:
+        # Log error but don't break the app
+        print(f"Error scanning directory: {e}")
+    
+    return result
 
-if "log_text" not in st.session_state:
-    st.session_state.log_text = ""
-if "is_running" not in st.session_state:
-    st.session_state.is_running = False
-if "process" not in st.session_state:
-    st.session_state.process = None
-if "thread" not in st.session_state:
-    st.session_state.thread = None
-if "stopped" not in st.session_state:
-    st.session_state.stopped = False
-if "_io_lock" not in st.session_state:
-    # small lock for thread-safe writes to session_state.log_text
-    st.session_state._io_lock = threading.Lock()
+# Cache for checking process status
+@st.cache_resource(ttl=2)  # Very short TTL for process checking
+def get_process_status(_proc_pid: Optional[int]) -> Dict[str, Any]:
+    """Check if process is still running with caching"""
+    if _proc_pid is None:
+        return {"is_alive": False, "returncode": None}
+    
+    try:
+        # Try to get process status
+        proc = subprocess.Popen(["ps", "-p", str(_proc_pid)], 
+                              stdout=subprocess.PIPE, 
+                              stderr=subprocess.PIPE)
+        stdout, _ = proc.communicate()
+        is_alive = str(_proc_pid) in stdout.decode()
+        
+        return {
+            "is_alive": is_alive,
+            "returncode": None if is_alive else -1
+        }
+    except Exception:
+        return {"is_alive": False, "returncode": -1}
 
 # Helper paths (per-session)
 def session_path(name: str) -> str:
     return os.path.join(st.session_state.session_dir, name)
+
+st.set_page_config(page_title="Automated Stakeholder Researcher", layout="wide")
 
 col1, col2 = st.columns([1, 5])
 
@@ -101,8 +175,6 @@ div.stButton > button:first-child {
 """, unsafe_allow_html=True)
 
 # --- Run / Stop toggle button ---
-#button_label = "Stop" if st.session_state.is_running else "Run Extraction"
-
 if st.session_state.is_running:
     button_label = "Stop"
 elif st.session_state.stopped:
@@ -115,43 +187,28 @@ action_button = st.button(button_label)
 with st.expander("View progress", expanded=True):
     log_placeholder = st.empty()
 
-# Thread target: read process stdout line-by-line and append to session log file & session_state.log_text
-def _reader_thread(proc, log_file_path):
+def _reader_thread(proc, log_file_path, queue):
+    """Background thread to read process output"""
     try:
         with open(log_file_path, "a", encoding="utf-8") as lf:
             # Read lines until process ends
-            for raw_line in iter(proc.stdout.readline, ""):
-                if raw_line == "" and proc.poll() is not None:
+            while True:
+                line = proc.stdout.readline()
+                if line:
+                    lf.write(line)
+                    lf.flush()
+                    queue.put(line)
+                elif proc.poll() is not None:
+                    # Process ended and no more output
                     break
-                if not raw_line:
+                else:
+                    # No output but process still running
                     time.sleep(0.05)
-                    continue
-                # Write both to disk (persist across reruns) and to in-memory log_text
-                lf.write(raw_line)
-                lf.flush()
-                with st.session_state._io_lock:
-                    # Keep last N KB to avoid runaway memory usage (trim if huge)
-                    st.session_state.log_text += raw_line
-                    if len(st.session_state.log_text) > 200_000:  # ~200KB cap, trim older part
-                        st.session_state.log_text = st.session_state.log_text[-150_000:]
-            # ensure any remaining lines are read
-            remaining = proc.stdout.read()
-            if remaining:
-                lf.write(remaining)
-                lf.flush()
-                with st.session_state._io_lock:
-                    st.session_state.log_text += remaining
     except Exception as e:
-        with st.session_state._io_lock:
-            st.session_state.log_text += f"\n[reader thread error] {e}\n"
+        queue.put(f"\n[reader thread error] {e}\n")
     finally:
-        # Mark finished
-        with st.session_state._io_lock:
-            st.session_state.is_running = False
-            st.session_state.process = None
-            st.session_state.thread = None
-            st.session_state.stopped = True  # user can reset
-            st.session_state.log_text += "\n[PROCESS FINISHED]\n"
+        # Signal completion - this goes to queue
+        queue.put("[PROCESS_FINISHED]\n")
 
 # Action button behavior
 if action_button:
@@ -161,8 +218,13 @@ if action_button:
             st.error("Please upload an Excel file first.")
             st.stop()
 
+        # Clear all caches when starting new process
+        scan_output_directory.clear()
+        get_process_status.clear()
+        
         # Reset session logging
         st.session_state.log_text = ""
+        
         # Save uploaded file to a per-session input path
         input_path = session_path(f"input_{uuid.uuid4().hex}.xlsx")
         with open(input_path, "wb") as f:
@@ -174,9 +236,8 @@ if action_button:
         # Build command (point to your excel_hybrid.py)
         cmd = [
             sys.executable,
+            "-W", "ignore",
             "-u",
-            #"-W",
-            "ignore",
             "excel_hybrid.py",
             input_path,
             str(max_entries),
@@ -196,9 +257,17 @@ if action_button:
             st.error(f"Failed to start extraction process: {e}")
             st.stop()
 
+        # Clear the log queue
+        while not log_queue.empty():
+            try:
+                log_queue.get_nowait()
+            except Empty:
+                break
+        
         st.session_state.process = proc
         st.session_state.is_running = True
         st.session_state.stopped = False
+        st.session_state.last_scan_time = time.time()
 
         log_file = session_path("process.log")
         # ensure previous log file cleared
@@ -207,9 +276,10 @@ if action_button:
         except Exception:
             pass
 
-        th = threading.Thread(target=_reader_thread, args=(proc, log_file), daemon=True)
+        th = threading.Thread(target=_reader_thread, args=(proc, log_file, log_queue), daemon=True)
         th.start()
         st.session_state.thread = th
+        st.rerun()
 
     # Stop (terminate) the running process
     elif st.session_state.is_running:
@@ -229,14 +299,32 @@ if action_button:
             st.session_state.stopped = True
             st.session_state.process = None
             st.session_state.log_text += "\n[PROCESS TERMINATED BY USER]\n"
+            
+            # Clear caches when process stops
+            scan_output_directory.clear()
+            get_process_status.clear()
+            
+            st.rerun()
 
     # Reset state to allow new run
     else:
         st.session_state.stopped = False
-        st.session_state.output_ready = False
         st.session_state.log_text = ""
         st.session_state.process = None
         st.session_state.is_running = False
+        st.session_state.output_ready = False
+        st.session_state.last_scan_time = time.time()
+        
+        # Clear all caches
+        scan_output_directory.clear()
+        get_process_status.clear()
+        
+        # Clear the log queue
+        while not log_queue.empty():
+            try:
+                log_queue.get_nowait()
+            except Empty:
+                break
         # optional: clear session_dir contents (keeps dir)
         try:
             for fname in os.listdir(st.session_state.session_dir):
@@ -250,68 +338,108 @@ if action_button:
                     pass
         except Exception:
             pass
-        st.experimental_rerun()
+        st.rerun()
 
-# While running: show progress and keep UI responsive
+# Process any queued log messages from background thread
+def process_log_queue():
+    """Process queued log messages in the main thread"""
+    try:
+        # Process more items to ensure we get all logs
+        max_items = 100  # Process up to 100 items per cycle
+        processed = 0
+        while not log_queue.empty() and processed < max_items:
+            log_msg = log_queue.get_nowait()
+            st.session_state.log_text += log_msg
+            processed += 1
+            # Trim if too long
+            if len(st.session_state.log_text) > 200_000:
+                st.session_state.log_text = st.session_state.log_text[-150_000:]
+    except Empty:
+        pass
+
+# Display logs
+def display_logs():
+    """Helper function to display logs"""
+    log_text_to_display = st.session_state.log_text if st.session_state.log_text else " "
+    log_placeholder.code(log_text_to_display)
+
+# Register cleanup function (only once)
+if not st.session_state.session_cleanup_registered:
+    def _register_session_cleanup(session_dir):
+        def _cleanup():
+            try:
+                shutil.rmtree(session_dir, ignore_errors=True)
+            except Exception:
+                pass
+        atexit.register(_cleanup)
+    
+    _register_session_cleanup(st.session_state.session_dir)
+    st.session_state.session_cleanup_registered = True
+
+# Process queued logs - ALWAYS do this regardless of running state
+process_log_queue()
+
+# Also read from log file when running to catch any missed messages
 if st.session_state.is_running:
-    st.write("Running stakeholder extraction...")
-    # show current in-memory logs
-    with st.session_state._io_lock:
-        log_placeholder.code(st.session_state.log_text if st.session_state.log_text else "Starting...")
-    # small delay to avoid busy-looping UI (Streamlit reruns regularly)
-    time.sleep(0.2)
-else:
-    # If not running, but a process.log exists, read it into log_text (persist across reruns)
     log_file = session_path("process.log")
-    if os.path.exists(log_file):
-        try:
+    try:
+        if os.path.exists(log_file):
             with open(log_file, "r", encoding="utf-8") as lf:
                 content = lf.read()
-            with st.session_state._io_lock:
-                # keep memory + file consistent
+            # Only update if we have new content
+            if content and len(content) > len(st.session_state.log_text):
                 st.session_state.log_text = content
-        except Exception:
-            pass
+    except Exception:
+        pass
+
+# Display logs
+display_logs()
+
+if st.session_state.is_running:
+    st.write("Running stakeholder extraction...")
     
-    # display logs
-    # with st.session_state._io_lock:
-    #     log_placeholder.code(st.session_state.log_text if st.session_state.log_text else "No run yet. Click Run Extraction.")
+    # Direct poll check - most reliable
+    if st.session_state.process:
+        returncode = st.session_state.process.poll()
+        if returncode is not None:  # Process has ended
+            st.session_state.is_running = False
+            st.session_state.stopped = False
+            if returncode == 0:
+                st.session_state.log_text += "\nProcess completed successfully!\n"
+            else:
+                st.session_state.log_text += f"\nProcess ended.\n"
+            
+            # Clear caches
+            scan_output_directory.clear()
+            get_process_status.clear()
+            st.rerun()
+    
+    # Continue auto-refresh
+    time.sleep(0.5)
+    st.rerun()
 
-def find_output_file():
-    files = os.listdir(st.session_state.session_dir)
-    # look for files that end with the provided output_name or look like outputs
-    candidates = [
-        os.path.join(st.session_state.session_dir, f)
-        for f in files
-        if f.endswith(output_name) or f.startswith("output_")
-    ]
-    # prefer exact match
-    for c in candidates:
-        if c.endswith(output_name):
-            return c
-    # otherwise return newest candidate
-    if candidates:
-        return max(candidates, key=os.path.getmtime)
-    return None
+# Use cached function to find output file
+scan_result = scan_output_directory(
+    st.session_state.session_dir, 
+    output_name, 
+    st.session_state.last_scan_time
+)
 
-output_file = find_output_file()
+output_file = scan_result["output_file"]
 if output_file and os.path.exists(output_file):
     with st.expander("Download Stakeholders", expanded=True):
         with open(output_file, "rb") as f:
-            st.download_button(label="Download Stakeholders", data=f, file_name=os.path.basename(output_file))
-
-# Optional: provide a cleanup button to delete session temp files (useful for long-running sessions)
-# if st.button("Cleanup session files"):
-#     try:
-#         if st.session_state.process and st.session_state.process.poll() is None:
-#             st.warning("Process still running — stop it before cleanup.")
-#         else:
-#             shutil.rmtree(st.session_state.session_dir, ignore_errors=True)
-#             # create a fresh session dir
-#             sd = tempfile.mkdtemp(prefix=f"session_{st.session_state.session_id}_")
-#             st.session_state.session_dir = sd
-#             st.success("Session files removed.")
-#     except Exception as e:
-#         st.error(f"Cleanup failed: {e}")
-
-
+            st.download_button(
+                label=f"Download Stakeholders ({scan_result['file_size'] // 1024} KB)",
+                data=f, 
+                file_name=os.path.basename(output_file),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
+        # Show file info
+        st.caption(f"Generated: {time.ctime(scan_result['file_mtime'])}")
+        
+        # Clear cache and update scan time when download is shown
+        if time.time() - st.session_state.last_scan_time > 5:
+            st.session_state.last_scan_time = time.time()
+            scan_output_directory.clear()

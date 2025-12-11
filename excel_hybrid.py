@@ -115,36 +115,57 @@ def get_roles_from_ism(ISM_df):
         "supporting and cross-functional stakeholders"
         ])
 
+        # Code below works, but I commented it out due to the openai api key not working:
+
+        # for row in df.itertuples(index=False):
+        #     for cell in row:
+        #         if pd.isnull(cell):
+        #             continue
+        #         text = str(cell).strip()
+        #         if not text or text.lower() in exclude_text:
+        #             continue
+
+        #         # Split multiple roles in the same cell
+        #         parts = split_pattern.split(text)
+        #         for part in parts:
+        #             part = part.strip()
+        #             if not part:
+        #                 continue
+        #             try:
+        #                 prompt = f"""
+        #                 Extract all the text that resembles job titles or industries from the following text.
+        #                 Return only a Python list of strings.
+        #                 Text: \"\"\"{part}\"\"\"
+        #                 """
+        #                 response = client.chat.completions.create(
+        #                     model="gpt-4.1-mini",
+        #                     messages=[{"role": "user", "content": prompt}],
+        #                     temperature=0
+        #                 )
+        #                 content = response.choices[0].message.content.strip()
+        #                 roles_from_ai = eval(content) if content.startswith("[") else []
+        #                 matched.update(roles_from_ai)
+        #             except Exception:
+        #                 pass 
+
+        # ^^^^^^
+
         for row in df.itertuples(index=False):
             for cell in row:
                 if pd.isnull(cell):
                     continue
                 text = str(cell).strip()
-                if not text or text.lower() in exclude_text:
+                if not text:
                     continue
 
-                # Split multiple roles in the same cell
+                # Split multiple items in the same cell
                 parts = split_pattern.split(text)
                 for part in parts:
                     part = part.strip()
-                    if not part:
+                    if not part or part.lower() in exclude_text:
                         continue
-                    try:
-                        prompt = f"""
-                        Extract all the text that resembles job titles or industries from the following text.
-                        Return only a Python list of strings.
-                        Text: \"\"\"{part}\"\"\"
-                        """
-                        response = client.chat.completions.create(
-                            model="gpt-4.1-mini",
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0
-                        )
-                        content = response.choices[0].message.content.strip()
-                        roles_from_ai = eval(content) if content.startswith("[") else []
-                        matched.update(roles_from_ai)
-                    except Exception:
-                        pass  # ignore errors
+                    # Only add to matched if it's not in exclude_text
+                    matched.add(part)
 
         roles = sorted(matched)
         return roles
@@ -505,11 +526,6 @@ def main():
     file_path = sys.argv[1]
     max_entries_per_company = int(sys.argv[2])
     OUTPUT_FILE = sys.argv[3]
-    
-    # Debugging 
-    #print(f"✔ Using uploaded file: {file_path}", flush=True)
-    #print(f"✔ Max employees per company: {max_entries_per_company}", flush=True)
-    #print(f"✔ Output filename: {OUTPUT_FILE}", flush=True)
 
     workbook = pd.ExcelFile(file_path)
     sheet_names = workbook.sheet_names
@@ -560,31 +576,28 @@ def main():
     roles = get_roles_from_ism(ISM_df)
     print("Initial roles:", roles)
 
-    # Generate variations
-    role_variations_dict = generate_variations(roles)
-    expanded_roles = roles.copy()
-    remaining_slots = 50 - len(expanded_roles)
-    seen_lower = set(r.lower() for r in expanded_roles)
+    # Generate variations (the code below works, but has been commented out due to openai api key issues)
 
-    for orig, variations in role_variations_dict.items():
-        for v in variations:
-            clean = v.strip().strip('"').strip("'")
-            if clean.lower() not in seen_lower:
-                expanded_roles.append(clean)
-                seen_lower.add(clean.lower())
-                remaining_slots -= 1
-            if remaining_slots <= 0:
-                break
-        if remaining_slots <= 0:
-            break
+    # role_variations_dict = generate_variations(roles)
+    # expanded_roles = roles.copy()
+    # remaining_slots = 50 - len(expanded_roles)
+    # seen_lower = set(r.lower() for r in expanded_roles)
 
-    expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
-    roles = expanded_roles
-    print(f"Expanded roles list: {roles}")
+    # for orig, variations in role_variations_dict.items():
+    #     for v in variations:
+    #         clean = v.strip().strip('"').strip("'")
+    #         if clean.lower() not in seen_lower:
+    #             expanded_roles.append(clean)
+    #             seen_lower.add(clean.lower())
+    #             remaining_slots -= 1
+    #         if remaining_slots <= 0:
+    #             break
+    #     if remaining_slots <= 0:
+    #         break
 
-    # Save cleaned accounts sheet (not the stakeholders)
-    accounts_df.to_excel(OUTPUT_FILE, index=False)
-    print(OUTPUT_FILE)
+    # expanded_roles = [p.singular_noun(role) or role for role in expanded_roles]
+    # roles = expanded_roles
+    # print(f"Expanded roles list: {roles}")
 
     apollo = ApolloClient()
     all_people = []
@@ -745,6 +758,7 @@ def main():
         return combined_results
 
     for acc, domain, alpha2 in zip(account_names, account_domains, alpha2_codes):
+        print(f"Processing account: {acc}", flush=True)
         try:
             people = process_company(acc, domain, alpha2, max_entries_per_company)
             if people:
@@ -761,8 +775,10 @@ def main():
         # Just testing out before saving
         #print(new_df)
         with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
+            accounts_df.to_excel(writer, sheet_name="Accounts", index=False)
+
             if all_people:
-                pd.DataFrame(all_people).to_excel(writer, sheet_name="stakeholders", index=False)
+                pd.DataFrame(all_people).to_excel(writer, sheet_name="Stakeholders", index=False)
                 print(f"Saved {len(all_people)} contacts to 'stakeholders' sheet.", flush=True)
             if missing_accounts:
                 pd.DataFrame(missing_accounts).to_excel(writer, sheet_name="missing", index=False)
